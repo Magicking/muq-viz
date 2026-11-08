@@ -26,14 +26,15 @@ Number of surfaces and their geometry come only from the JSON. Inspect with `--p
 
 ```
 scripts/build.sh      # Docker, Debian 12 toolchain -> build-docker/muq-viz
-BASTION=user@bastion TARGET=user@target scripts/deploy.sh   # copy to target:~/muq-viz via bastion
+cp .env.example .env  # once: set BASTION / BASTION_PORT / TARGET
+scripts/deploy.sh     # copy to target:~/muq-viz via bastion
 ```
 
 Without Docker (host toolchain; builds static SDL2 + patched projectM once into `build-native/deps`):
 
 ```
 scripts/build-native.sh                        # -> build-native/muq-viz
-BIN=build-native/muq-viz BASTION=... TARGET=... scripts/deploy.sh   # deploy that binary instead
+BIN=build-native/muq-viz scripts/deploy.sh     # deploy that binary instead
 ```
 
 Host needs cmake, git, patch, pkg-config, a C++17 compiler and the X11/GL/PipeWire dev packages

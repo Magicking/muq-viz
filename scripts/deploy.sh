@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Copy sources + built binary to the target through the bastion.
-# Usage: BASTION=user@bastion TARGET=user@target [BASTION_PORT=22] scripts/deploy.sh
+# Config: .env at repo root (see .env.example); environment variables override it.
 # Target layout: ~/muq-viz (git work tree), binary in ~/muq-viz/bin/muq-viz
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-BASTION="${BASTION:?set BASTION=user@host}"
+if [ -f "$here/.env" ]; then
+    while IFS='=' read -r k v; do
+        k="${k//[[:space:]]/}"; v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
+        case "$k" in BASTION|BASTION_PORT|TARGET|DEST|BIN) [ -n "${!k:-}" ] || export "$k=$v" ;; esac
+    done < "$here/.env"
+fi
+BASTION="${BASTION:?set BASTION in .env (see .env.example)}"
 BASTION_PORT="${BASTION_PORT:-22}"
-TARGET="${TARGET:?set TARGET=user@host}"
+TARGET="${TARGET:?set TARGET in .env (see .env.example)}"
 DEST="${DEST:-muq-viz}"
 BIN="${BIN:-$here/build-docker/muq-viz}"   # e.g. BIN=build-native/muq-viz
 
