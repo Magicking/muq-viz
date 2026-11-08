@@ -1,0 +1,70 @@
+diff --git a/src/api/include/projectM-4/render_opengl.h b/src/api/include/projectM-4/render_opengl.h
+index 0a061f7..0a3c601 100644
+--- a/src/api/include/projectM-4/render_opengl.h
++++ b/src/api/include/projectM-4/render_opengl.h
+@@ -41,6 +41,13 @@ extern "C" {
+  */
+ PROJECTM_EXPORT void projectm_opengl_render_frame(projectm_handle instance);
+ 
++/**
++ * @brief Renders a single frame into the given framebuffer object (muq-viz patch).
++ * @param instance The projectM instance handle.
++ * @param framebuffer_object_id OpenGL FBO name to draw the final image into (0 = default framebuffer).
++ */
++PROJECTM_EXPORT void projectm_opengl_render_frame_fbo(projectm_handle instance, uint32_t framebuffer_object_id);
++
+ #ifdef __cplusplus
+ } // extern "C"
+ #endif
+diff --git a/src/libprojectM/ProjectM.cpp b/src/libprojectM/ProjectM.cpp
+index 88fa014..0354757 100644
+--- a/src/libprojectM/ProjectM.cpp
++++ b/src/libprojectM/ProjectM.cpp
+@@ -90,7 +90,7 @@ void ProjectM::ResetTextures()
+     m_textureManager = std::make_unique<Renderer::TextureManager>(m_textureSearchPaths);
+ }
+ 
+-void ProjectM::RenderFrame()
++void ProjectM::RenderFrame(uint32_t targetFramebufferObject)
+ {
+     // Don't render if window area is zero.
+     if (m_windowWidth == 0 || m_windowHeight == 0)
+@@ -167,7 +167,7 @@ void ProjectM::RenderFrame()
+     m_activePreset->RenderFrame(audioData, renderContext);
+ 
+     // ToDo: Allow external apps to provide a custom target framebuffer.
+-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFramebufferObject);
+     glViewport(0, 0, renderContext.viewportSizeX, renderContext.viewportSizeY);
+ 
+ #ifdef USE_GLES
+diff --git a/src/libprojectM/ProjectM.hpp b/src/libprojectM/ProjectM.hpp
+index b84e293..8445971 100644
+--- a/src/libprojectM/ProjectM.hpp
++++ b/src/libprojectM/ProjectM.hpp
+@@ -101,7 +101,7 @@ public:
+ 
+     void ResetTextures();
+ 
+-    void RenderFrame();
++    void RenderFrame(uint32_t targetFramebufferObject = 0);
+ 
+     void SetBeatSensitivity(float sensitivity);
+ 
+diff --git a/src/libprojectM/ProjectMCWrapper.cpp b/src/libprojectM/ProjectMCWrapper.cpp
+index d58f123..d60c821 100644
+--- a/src/libprojectM/ProjectMCWrapper.cpp
++++ b/src/libprojectM/ProjectMCWrapper.cpp
+@@ -171,6 +171,12 @@ void projectm_opengl_render_frame(projectm_handle instance)
+     projectMInstance->RenderFrame();
+ }
+ 
++void projectm_opengl_render_frame_fbo(projectm_handle instance, uint32_t framebuffer_object_id)
++{
++    auto projectMInstance = handle_to_instance(instance);
++    projectMInstance->RenderFrame(framebuffer_object_id);
++}
++
+ void projectm_set_beat_sensitivity(projectm_handle instance, float sensitivity)
+ {
+     auto projectMInstance = handle_to_instance(instance);
