@@ -2,6 +2,7 @@
 // window / fullscreen / OBS-layout multi-window output.
 
 #include "App.hpp"
+#include "Config.hpp"
 
 #include <SDL.h>
 
@@ -51,9 +52,16 @@ void Usage(const char* argv0)
         "      --no-ui             start with the control window hidden (toggle: M or Tab)\n"
         "      --ui-scale F        control window scale (default 1.0)\n"
         "      --list-monitors     print monitors and exit\n"
+        "Web UI:\n"
+        "      --no-web            disable the web control UI\n"
+        "      --web-port N        web UI port (default 8080)\n"
+        "      --web-bind ADDR     web UI listen address (default 0.0.0.0 = all interfaces, no auth)\n"
+        "Config:\n"
+        "      --config FILE       INI config file to load at start and save to (default %s)\n"
+        "      --no-config         do not load the config file (saving still goes to --config if given)\n"
         "      --print-layout      parse --layout, print surfaces and exit\n"
         "  -h, --help\n",
-        argv0);
+        argv0, muq::DefaultConfigPath().empty() ? "(none)" : muq::DefaultConfigPath().c_str());
 }
 
 bool ParseSize(const char* s, int& w, int& h)
@@ -150,7 +158,48 @@ int main(int argc, char** argv)
 {
     muq::Options opt;
     bool modeGiven = false;
+    bool layoutGiven = false;
     bool printLayout = false;
+
+    // Config file first (defaults < config < command line).
+    bool loadConfig = true;
+    std::string configPath = muq::DefaultConfigPath();
+    bool configGiven = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        if (a == "--no-config")
+            loadConfig = false;
+        else if (a == "--config" && i + 1 < argc)
+        {
+            configPath = argv[++i];
+            configGiven = true;
+        }
+    }
+    if (!loadConfig && !configGiven)
+    {
+        configPath.clear(); // nothing to save to
+    }
+    if (loadConfig && !configPath.empty())
+    {
+        std::vector<std::string> warnings;
+        const bool loaded = muq::LoadConfig(configPath, opt, warnings);
+        for (const auto& w : warnings)
+        {
+            std::fprintf(stderr, "config %s: %s\n", configPath.c_str(), w.c_str());
+        }
+        if (loaded)
+        {
+            std::printf("config: loaded %s\n", configPath.c_str());
+        }
+        else if (configGiven && warnings.empty())
+        {
+            std::printf("config: %s does not exist yet (Save config creates it)\n", configPath.c_str());
+        }
+    }
+    opt.configPath = configPath;
+    const std::vector<std::string> configPresetDirs = opt.presetDirs;
+    opt.presetDirs.clear();
 
     for (int i = 1; i < argc; ++i)
     {
@@ -172,20 +221,17 @@ int main(int argc, char** argv)
         {
             const std::string m = next();
             modeGiven = true;
-            if (m == "window")
-                opt.mode = muq::OutputMode::Window;
-            else if (m == "fullscreen")
-                opt.mode = muq::OutputMode::Fullscreen;
-            else if (m == "layout")
-                opt.mode = muq::OutputMode::Layout;
-            else
+            if (!muq::ParseMode(m, opt.mode))
             {
                 std::fprintf(stderr, "unknown mode: %s\n", m.c_str());
                 return 2;
             }
         }
         else if (a == "-l" || a == "--layout")
+        {
             opt.layoutPath = next();
+            layoutGiven = true;
+        }
         else if (a == "--prefix")
             opt.layout.prefix = next();
         else if (a == "--scene")
@@ -202,7 +248,7 @@ int main(int argc, char** argv)
             opt.monitor = next();
         else if (a == "--origin")
         {
-            SDL_Point p{};
+            muq::Point p{};
             if (std::sscanf(next(), "%d,%d", &p.x, &p.y) != 2)
             {
                 std::fprintf(stderr, "--origin expects X,Y\n");
@@ -254,6 +300,24 @@ int main(int argc, char** argv)
             opt.uiScale = std::max(0.5f, static_cast<float>(std::atof(next())));
         else if (a == "--print-layout")
             printLayout = true;
+        else if (a == "--no-web")
+            opt.webEnabled = false;
+        else if (a == "--web-port")
+        {
+            const int port = std::atoi(next());
+            if (port < 1 || port > 65535)
+            {
+                std::fprintf(stderr, "--web-port expects 1..65535\n");
+                return 2;
+            }
+            opt.webPort = port;
+        }
+        else if (a == "--web-bind")
+            opt.webBind = next();
+        else if (a == "--config")
+            ++i; // handled above
+        else if (a == "--no-config")
+            ;    // handled above
         else
         {
             std::fprintf(stderr, "unknown option: %s (see --help)\n", a.c_str());
@@ -290,13 +354,22 @@ int main(int argc, char** argv)
         }
     }
 
-    if (!opt.layoutPath.empty() && !modeGiven)
+    if (layoutGiven && !modeGiven)
     {
         opt.mode = muq::OutputMode::Layout;
     }
     if (opt.presetDirs.empty())
     {
+        // Command line -p replaces the config list; otherwise config, otherwise auto-detect.
+        for (const auto& d : configPresetDirs)
+        {
+            opt.presetDirs.push_back(Normalize(d));
+        }
+    }
+    if (opt.presetDirs.empty())
+    {
         opt.presetDirs = DefaultPresetDirs();
+        opt.presetDirsAuto = true;
     }
     if (opt.presetDirs.empty())
     {

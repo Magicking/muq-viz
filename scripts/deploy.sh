@@ -4,6 +4,7 @@
 # Target layout: ~/muq-viz (git work tree), binary in ~/muq-viz/bin/muq-viz
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
+
 if [ -f "$here/.env" ]; then
     while IFS='=' read -r k v; do
         k="${k//[[:space:]]/}"; v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
@@ -21,7 +22,7 @@ BIN="${BIN:-$here/build-docker/muq-viz}"   # e.g. BIN=build-native/muq-viz
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/bin"
-tar -C "$here" --exclude=./build-docker --exclude=./build-native --exclude=./build --exclude=./.git --exclude=./presets -cf - . | tar -C "$stage" -xf -
+tar -C "$here" --exclude=./build-docker --exclude=./build-native --exclude=./build --exclude=./.git --exclude=./.env --exclude=./presets -cf - . | tar -C "$stage" -xf -
 cp "$BIN" "$stage/bin/muq-viz"
 
 tar -C "$stage" -czf - . | ssh -p "$BASTION_PORT" "$BASTION" \

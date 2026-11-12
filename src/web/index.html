@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>muq-viz control</title>
+<style>
+:root {
+  --bg: #141419; --panel: #1d1d25; --line: #2e2e3a; --text: #e4e4ea; --dim: #9a9aab;
+  --accent: #4a7fd6; --accent-2: #2f5ba3; --warn: #f0a05a; --err: #f06a6a; --ok: #6ad08a;
+  --row: 28px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 12px 16px 40px; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 4px 0 10px; }
+header h1 { font-size: 18px; margin: 0; }
+header .meta { color: var(--dim); font-size: 12px; margin-left: auto; }
+#banner { display: none; background: var(--err); color: #000; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
+#banner.show { display: block; }
+details { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+summary { cursor: pointer; padding: 10px 12px; font-weight: 600; user-select: none; }
+.body { padding: 0 12px 12px; display: grid; gap: 10px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.grow { flex: 1 1 auto; min-width: 0; }
+button { background: var(--accent-2); color: var(--text); border: 1px solid var(--accent); border-radius: 6px;
+  padding: 7px 14px; font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { background: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+select, input[type=text], input[type=search], input[type=number] {
+  background: #111116; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 8px; font: inherit; width: 100%; min-width: 0; }
+input[type=number] { width: 80px; }
+label.chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+input[type=checkbox], input[type=radio] { width: 18px; height: 18px; accent-color: var(--accent); }
+.slider { display: grid; grid-template-columns: 130px 1fr 80px; gap: 8px; align-items: center; }
+.slider input[type=range] { width: 100%; accent-color: var(--accent); }
+.meter { position: relative; height: 24px; background: #111116; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.meter > div { position: absolute; inset: 0 auto 0 0; background: var(--accent-2); width: 0; transition: width .1s linear; }
+.meter > span { position: relative; display: block; text-align: center; line-height: 22px; font-size: 12px; }
+.now { font-size: 15px; word-break: break-word; }
+.now b { color: var(--dim); font-weight: 400; }
+.dim { color: var(--dim); font-size: 12px; }
+.warn { color: var(--warn); }
+.err { color: var(--err); }
+.hidden { display: none !important; }
+#list { position: relative; height: calc(var(--row) * 14); overflow-y: auto; border: 1px solid var(--line);
+  border-radius: 6px; background: #111116; }
+#list .spacer { position: relative; }
+#list .item { position: absolute; left: 0; right: 0; height: var(--row); line-height: var(--row); padding: 0 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+#list .item:hover { background: #24243a; }
+#list .item.cur { background: var(--accent-2); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--dim); font-weight: 500; }
+code { background: #111116; padding: 1px 4px; border-radius: 4px; }
+@media (max-width: 520px) {
+  .slider { grid-template-columns: 1fr 70px; }
+  .slider > span:first-child { grid-column: 1 / -1; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>muq-viz</h1>
+    <span class="meta" id="meta"></span>
+  </header>
+  <div id="banner">Connection lost, retrying...</div>
+
+  <details open>
+    <summary>Audio input (PipeWire)</summary>
+    <div class="body">
+      <div id="audioErr" class="err hidden"></div>
+      <div id="audioBox">
+        <div class="row"><select id="source" class="grow"></select></div>
+        <div class="meter" style="margin-top:8px"><div id="peakBar"></div><span id="peakText"></span></div>
+        <div id="audioWarn" class="warn hidden" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </details>
+
+  <details open>
+    <summary>Presets</summary>
+    <div class="body">
+      <div class="now"><b>Now:</b> <span id="now"></span></div>
+      <div class="row">
+        <button data-cmd="prev">&laquo; Prev</button>
+        <button data-cmd="next">Next &raquo;</button>
+        <button data-cmd="random">Random</button>
+        <label class="chk"><input type="checkbox" data-set="lock"> Lock</label>
+        <label class="chk"><input type="checkbox" data-set="shuffle"> Shuffle</label>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" data-set="smooth"> Smooth transitions</label>
+        <label class="chk"><input type="checkbox" data-set="hardCuts"> Beat hard cuts</label>
+      </div>
+      <div class="slider"><span>Duration (s)</span>
+        <input type="range" data-set="duration" min="5" max="300" step="1">
+        <input type="number" data-set="duration" min="5" max="300" step="1"></div>
+      <div class="slider"><span>Transition (s)</span>
+        <input type="range" data-set="softCut" min="0" max="10" step="0.1">
+        <input type="number" data-set="softCut" min="0" max="10" step="0.1"></div>
+      <div class="slider"><span>Beat sensitivity</span>
+        <input type="range" data-set="beatSensitivity" min="0" max="5" step="0.01">
+        <input type="number" data-set="beatSensitivity" min="0" max="5" step="0.01"></div>
+      <input type="search" id="search" placeholder="search presets..." autocomplete="off">
+      <div class="dim" id="count"></div>
+      <div id="list"><div class="spacer" id="spacer"></div></div>
+      <div id="failures" class="warn hidden"></div>
+    </div>
+  </details>
+
+  <details open>
+    <summary>Output</summary>
+    <div class="body">
+      <div class="row">
+        <label class="chk"><input type="radio" name="mode" value="window"> Window</label>
+        <label class="chk"><input type="radio" name="mode" value="fullscreen"> Fullscreen</label>
+        <label class="chk"><input type="radio" name="mode" value="layout"> OBS layout</label>
+      </div>
+      <div class="slider"><span>Brightness</span>
+        <input type="range" data-set="brightness" min="0" max="2" step="0.01">
+        <div class="row" style="flex-wrap:nowrap;gap:4px">
+          <input type="number" data-set="brightness" min="0" max="2" step="0.01">
+        </div></div>
+      <div class="row"><button id="brightReset">Reset brightness</button>
+        <span id="brightNote" class="dim hidden">brightness shader unavailable</span></div>
+      <div class="row"><span>Monitor</span><select id="monitor" class="grow"></select></div>
+      <div class="row">
+        <input type="text" id="layoutPath" class="grow" placeholder="OBS scene-collection JSON path (on the visualizer host)">
+        <button id="loadLayout">Load JSON</button>
+      </div>
+      <div id="layoutErr" class="err hidden"></div>
+      <div class="dim" id="canvas"></div>
+      <table><thead><tr><th>Surface</th><th>Screen geometry</th><th>Canvas slice</th></tr></thead>
+        <tbody id="outputs"></tbody></table>
+    </div>
+  </details>
+
+  <details open>
+    <summary>Config</summary>
+    <div class="body">
+      <div class="dim">File: <code id="cfgPath"></code></div>
+      <div class="row"><button id="saveCfg">Save config</button><span id="cfgStatus" class="dim"></span></div>
+      <div class="dim">Saves current settings, audio source, mode and preset; loaded automatically at start
+        (command-line options override it).</div>
+    </div>
+  </details>
+
+  <details>
+    <summary>Info</summary>
+    <div class="body">
+      <div id="fps"></div>
+      <label class="chk"><input type="checkbox" id="uiVisible"> Show control panel window on the visualizer host</label>
+      <div class="dim">Keys (on the host): N next, P prev, R random, L lock, F fullscreen, [ / ] brightness,
+        M/Tab hide panel, Ctrl+S save config, Esc (on output) / Ctrl+Q quit</div>
+    </div>
+  </details>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const fmt = { duration: (v) => Math.round(v), softCut: (v) => (+v).toFixed(1),
+  beatSensitivity: (v) => (+v).toFixed(2), brightness: (v) => (+v).toFixed(2) };
+
+let state = null;
+let labels = [];
+let lowerLabels = [];
+let presetsVersion = -1;
+let filtered = [];
+let lastCurrent = null;
+let scrollToCurrent = true;
+
+function send(obj) {
+  return fetch("api/cmd", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(obj) }).catch(() => {});
+}
+function set(key, value) { return send({ cmd: "set", key, value }); }
+
+// A control the user is touching is not overwritten by polled state.
+const busy = new WeakSet();
+function busyEl(el) { return busy.has(el) || document.activeElement === el; }
+function setVal(el, v) { if (!busyEl(el) && String(el.value) !== String(v)) el.value = v; }
+function setChk(el, v) { if (!busyEl(el)) el.checked = !!v; }
+function show(el, on) { el.classList.toggle("hidden", !on); }
+
+// ---- buttons / toggles
+document.querySelectorAll("button[data-cmd]").forEach((b) =>
+  b.addEventListener("click", () => send({ cmd: b.dataset.cmd })));
+document.querySelectorAll("input[type=checkbox][data-set]").forEach((c) =>
+  c.addEventListener("change", () => set(c.dataset.set, c.checked)));
+
+// ---- sliders: range + number pair per key, throttled while dragging
+const throttles = {};
+function sendThrottled(key, value) {
+  const t = throttles[key] || (throttles[key] = { timer: 0, value: 0 });
+  t.value = value;
+  if (t.timer) return;
+  t.timer = setTimeout(() => { t.timer = 0; set(key, t.value); }, 60);
+}
+document.querySelectorAll("input[data-set]:not([type=checkbox])").forEach((el) => {
+  const key = el.dataset.set;
+  const peers = () => document.querySelectorAll(`input[data-set="${key}"]:not([type=checkbox])`);
+  const begin = () => busy.add(el);
+  const end = () => setTimeout(() => busy.delete(el), 400);
+  el.addEventListener("pointerdown", begin);
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.addEventListener("input", () => {
+    const v = parseFloat(el.value);
+    if (Number.isNaN(v)) return;
+    peers().forEach((p) => { if (p !== el) p.value = fmt[key] ? fmt[key](v) : v; });
+    sendThrottled(key, v);
+  });
+});
+$("brightReset").addEventListener("click", () => set("brightness", 1.0));
+
+// ---- audio source
+$("source").addEventListener("change", (e) => send({ cmd: "source", name: e.target.value }));
+
+// ---- output
+document.querySelectorAll("input[name=mode]").forEach((r) =>
+  r.addEventListener("change", () => { if (r.checked) send({ cmd: "mode", mode: r.value }); }));
+$("monitor").addEventListener("change", (e) => send({ cmd: "monitor", index: parseInt(e.target.value, 10) }));
+$("loadLayout").addEventListener("click", () => send({ cmd: "loadLayout", path: $("layoutPath").value }));
+$("layoutPath").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loadLayout").click(); });
+
+// ---- config / info
+$("saveCfg").addEventListener("click", () => send({ cmd: "saveConfig" }));
+$("uiVisible").addEventListener("change", (e) => send({ cmd: "ui", visible: e.target.checked }));
+
+// ---- preset list (virtualized: thousands of presets)
+const list = $("list"), spacer = $("spacer");
+const rowH = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row")) || 28;
+function refilter() {
+  const needle = $("search").value.toLowerCase();
+  filtered = [];
+  for (let i = 0; i < labels.length; i++) {
+    if (!needle || lowerLabels[i].includes(needle)) filtered.push(i);
+  }
+  $("count").textContent = `${filtered.length} / ${labels.length} presets`;
+  spacer.style.height = filtered.length * rowH() + "px";
+  renderList();
+}
+function renderList() {
+  const h = rowH();
+  const first = Math.max(0, Math.floor(list.scrollTop / h) - 4);
+  const last = Math.min(filtered.length, Math.ceil((list.scrollTop + list.clientHeight) / h) + 4);
+  const cur = state && state.preset.index;
+  const frag = document.createDocumentFragment();
+  for (let r = first; r < last; r++) {
+    const idx = filtered[r];
+    const d = document.createElement("div");
+    d.className = "item" + (idx === cur ? " cur" : "");
+    d.style.top = r * h + "px";
+    d.textContent = labels[idx];
+    d.title = labels[idx];
+    d.dataset.idx = idx;
+    frag.appendChild(d);
+  }
+  spacer.replaceChildren(frag);
+}
+list.addEventListener("scroll", renderList, { passive: true });
+list.addEventListener("click", (e) => {
+  const d = e.target.closest(".item");
+  if (d) send({ cmd: "play", index: parseInt(d.dataset.idx, 10) });
+});
+$("search").addEventListener("input", () => { scrollToCurrent = false; refilter(); });
+function scrollCurrentIntoView() {
+  const cur = state && state.preset.index;
+  const r = filtered.indexOf(cur);
+  if (r < 0) return;
+  const h = rowH();
+  const top = r * h, view = list.clientHeight;
+  if (top < list.scrollTop || top + h > list.scrollTop + view) list.scrollTop = top - view / 2 + h / 2;
+}
+
+async function loadPresets() {
+  const res = await fetch("api/presets", { cache: "no-store" });
+  const j = await res.json();
+  labels = j.labels || [];
+  lowerLabels = labels.map((l) => l.toLowerCase());
+  presetsVersion = j.version;
+  refilter();
+  scrollToCurrent = true;
+}
+
+// ---- state -> DOM
+function fillSelect(sel, options, value) {
+  const sig = JSON.stringify(options);
+  if (sel.dataset.sig !== sig) {
+    sel.replaceChildren(...options.map((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value; opt.textContent = o.text; if (o.title) opt.title = o.title;
+      return opt;
+    }));
+    sel.dataset.sig = sig;
+  }
+  if (!busyEl(sel)) sel.value = value;
+}
+
+function render(s) {
+  // Audio
+  const a = s.audio;
+  show($("audioErr"), !a.ok);
+  show($("audioBox"), a.ok);
+  if (!a.ok) {
+    $("audioErr").textContent = "PipeWire unavailable: " + a.error;
+  } else {
+    const opts = [{ value: "", text: "Default output (monitor)" }];
+    let present = a.selected === "";
+    for (const n of a.nodes) {
+      opts.push({ value: n.name, text: n.label, title: `${n.name}\n${n.mediaClass} (id ${n.id})` });
+      if (n.name === a.selected) present = true;
+    }
+    if (!present) opts.push({ value: a.selected, text: a.selected + " (not present)" });
+    fillSelect($("source"), opts, a.selected);
+    $("peakBar").style.width = (a.peak * 100).toFixed(1) + "%";
+    $("peakText").textContent = `${a.streaming ? "streaming" : "waiting"}  ${a.rate} Hz  peak ${a.peak.toFixed(2)}`;
+    show($("audioWarn"), !!a.error);
+    $("audioWarn").textContent = a.error;
+  }
+
+  // Presets
+  const p = s.preset;
+  $("now").textContent = p.label;
+  document.querySelectorAll("input[type=checkbox][data-set]").forEach((c) => setChk(c, p[c.dataset.set]));
+  document.querySelectorAll("input[data-set]:not([type=checkbox])").forEach((el) => {
+    const k = el.dataset.set;
+    const v = k === "brightness" ? s.output.brightness : p[k];
+    if (v !== undefined) setVal(el, fmt[k] ? fmt[k](v) : v);
+  });
+  show($("failures"), p.failures > 0);
+  $("failures").textContent = `${p.failures} failed load(s); last: ${p.lastFailure}`;
+  if (p.presetsVersion !== presetsVersion) loadPresets();
+  if (p.index !== lastCurrent) {
+    lastCurrent = p.index;
+    scrollToCurrent = true;
+    renderList();
+  }
+  if (scrollToCurrent && filtered.length) { scrollCurrentIntoView(); scrollToCurrent = false; renderList(); }
+
+  // Output
+  const o = s.output;
+  const shownMode = o.pendingMode || o.mode;
+  document.querySelectorAll("input[name=mode]").forEach((r) => {
+    if (!busyEl(r)) r.checked = r.value === shownMode;
+    r.disabled = r.value === "layout" && !o.layoutLoaded;
+  });
+  document.querySelectorAll('input[data-set="brightness"]').forEach((el) => el.disabled = !o.brightnessAvailable);
+  $("brightReset").disabled = !o.brightnessAvailable;
+  show($("brightNote"), !o.brightnessAvailable);
+  fillSelect($("monitor"), o.monitors.map((m) => ({ value: String(m.index),
+    text: `${m.index}: ${m.name}  ${m.w}x${m.h}+${m.x}+${m.y}` })), String(o.monitor));
+  setVal($("layoutPath"), o.layoutPath);
+  show($("layoutErr"), !!o.layoutError);
+  $("layoutErr").textContent = "layout: " + o.layoutError;
+  $("canvas").textContent = `Canvas ${o.canvas.w}x${o.canvas.h}, ${o.outputs.length} window(s)`;
+  const g = (r) => `${r.w}x${r.h}+${r.x}+${r.y}`;
+  const rows = o.outputs.map((w) => `<tr><td></td><td>${g(w.screen)}</td><td>${g(w.slice)}</td></tr>`).join("");
+  const tbody = $("outputs");
+  if (tbody.dataset.sig !== rows + o.outputs.map((w) => w.name).join("\u0001")) {
+    tbody.innerHTML = rows;
+    [...tbody.rows].forEach((tr, i) => tr.cells[0].textContent = o.outputs[i].name);
+    tbody.dataset.sig = rows + o.outputs.map((w) => w.name).join("\u0001");
+  }
+
+  // Config / info
+  $("cfgPath").textContent = s.config.path || "(none)";
+  $("saveCfg").disabled = !s.config.path;
+  $("cfgStatus").textContent = s.config.status;
+  $("fps").textContent = `${s.info.fps.toFixed(1)} FPS (target ${s.info.targetFps})`;
+  setChk($("uiVisible"), s.info.uiVisible);
+  $("meta").textContent = `v${s.info.version}`;
+}
+
+async function poll() {
+  try {
+    const res = await fetch("api/state", { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status);
+    state = await res.json();
+    $("banner").classList.remove("show");
+    render(state);
+    setTimeout(poll, 200);
+  } catch (e) {
+    $("banner").classList.add("show");
+    setTimeout(poll, 1000);
+  }
+}
+poll();
+</script>
+</body>
+</html>

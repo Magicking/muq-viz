@@ -1,4 +1,5 @@
 #include "App.hpp"
+#include "Config.hpp"
 
 #include <projectM-4/playlist.h>
 #include <projectM-4/projectM.h>
@@ -9,6 +10,8 @@
 
 #include <GL/gl.h>
 #include <GL/glext.h>
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -22,20 +25,6 @@
 namespace fs = std::filesystem;
 
 namespace muq {
-
-const char* ModeName(OutputMode mode)
-{
-    switch (mode)
-    {
-        case OutputMode::Window:
-            return "window";
-        case OutputMode::Fullscreen:
-            return "fullscreen";
-        case OutputMode::Layout:
-            return "layout";
-    }
-    return "?";
-}
 
 namespace {
 
@@ -85,10 +74,10 @@ bool App::Init()
 
     if (!m_opt.layoutPath.empty())
     {
-        if (!LoadLayout(m_opt.layoutPath) && m_opt.mode == OutputMode::Layout)
+        if (!LoadLayout(m_opt.layoutPath))
         {
+            // Keep running (window mode) so the panel / web UI can load another layout.
             std::fprintf(stderr, "layout: %s\n", m_layoutError.c_str());
-            return false;
         }
     }
 
@@ -151,6 +140,7 @@ bool App::Init()
     {
         return false;
     }
+    PublishPresets();
 
     m_audioOk = m_audio.Start();
     if (!m_audioOk)
@@ -164,6 +154,8 @@ bool App::Init()
     m_pcm.resize(4096 * AudioPipeWire::Channels);
 
     BuildOutputs(m_opt.mode);
+    StartWeb();
+    PublishState();
     return !m_outputs.empty();
 }
 
@@ -332,14 +324,22 @@ void App::LoadPresets()
     bool found = false;
     if (!m_opt.startPreset.empty())
     {
+        // Exact label (as saved in the config) first, then substring match.
+        for (uint32_t i = 0; i < m_presetLabels.size() && !found; ++i)
+        {
+            if (m_presetLabels[i] == m_opt.startPreset)
+            {
+                start = i;
+                found = true;
+            }
+        }
         const std::string needle = Lower(m_opt.startPreset);
-        for (uint32_t i = 0; i < m_presetLabels.size(); ++i)
+        for (uint32_t i = 0; i < m_presetLabels.size() && !found; ++i)
         {
             if (Lower(m_presetLabels[i]).find(needle) != std::string::npos)
             {
                 start = i;
                 found = true;
-                break;
             }
         }
     }
@@ -465,7 +465,7 @@ void App::BuildOutputs(OutputMode mode)
         }
         case OutputMode::Layout:
         {
-            const SDL_Point origin = m_opt.origin ? *m_opt.origin : SDL_Point{display.x, display.y};
+            const Point origin = m_opt.origin ? *m_opt.origin : Point{display.x, display.y};
             const Rect& b = m_layout->bounds;
             if (m_opt.overrideRedirect)
             {
@@ -640,6 +640,161 @@ void App::PlayRandom()
     PlayIndex(dist(rng));
 }
 
+void App::PlayNext()
+{
+    projectm_playlist_play_next(m_playlist, !m_opt.smooth);
+}
+
+void App::PlayPrev()
+{
+    projectm_playlist_play_previous(m_playlist, !m_opt.smooth);
+}
+
+void App::SetLock(bool lock)
+{
+    m_opt.lock = lock;
+    projectm_set_preset_locked(m_pm, lock);
+}
+
+void App::SetShuffle(bool shuffle)
+{
+    m_opt.shuffle = shuffle;
+    projectm_playlist_set_shuffle(m_playlist, shuffle);
+}
+
+void App::SetSmooth(bool smooth)
+{
+    m_opt.smooth = smooth;
+}
+
+void App::SetHardCuts(bool hardCuts)
+{
+    m_opt.hardCuts = hardCuts;
+    projectm_set_hard_cut_enabled(m_pm, hardCuts);
+}
+
+void App::SetDuration(double seconds)
+{
+    m_opt.presetDuration = std::clamp(seconds, 5.0, 300.0);
+    projectm_set_preset_duration(m_pm, m_opt.presetDuration);
+}
+
+void App::SetSoftCut(double seconds)
+{
+    m_opt.softCut = std::clamp(seconds, 0.0, 10.0);
+    projectm_set_soft_cut_duration(m_pm, m_opt.softCut);
+}
+
+void App::SetBeatSensitivity(float sensitivity)
+{
+    m_opt.beatSensitivity = std::clamp(sensitivity, 0.0f, 5.0f);
+    projectm_set_beat_sensitivity(m_pm, m_opt.beatSensitivity);
+}
+
+void App::SetBrightness(float brightness)
+{
+    m_opt.brightness = std::clamp(brightness, 0.0f, 2.0f);
+}
+
+void App::SelectSource(const std::string& nodeName)
+{
+    if (m_audioOk)
+    {
+        m_audio.Select(nodeName);
+    }
+    m_opt.source = nodeName;
+}
+
+void App::RequestMode(OutputMode mode)
+{
+    if (mode == OutputMode::Layout && !m_layout)
+    {
+        return;
+    }
+    m_rebuildRequested = true;
+    m_requestedMode = mode;
+}
+
+void App::SelectMonitor(int index)
+{
+    if (index < 0 || index >= SDL_GetNumVideoDisplays())
+    {
+        return;
+    }
+    m_opt.monitor = std::to_string(index);
+    m_opt.origin.reset();
+    if (!m_rebuildRequested)
+    {
+        m_requestedMode = m_mode;
+    }
+    m_rebuildRequested = true;
+}
+
+bool App::LoadLayoutAndSwitch(const std::string& path)
+{
+    std::snprintf(m_layoutPathBuf, sizeof(m_layoutPathBuf), "%s", path.c_str());
+    if (!LoadLayout(path))
+    {
+        return false;
+    }
+    RequestMode(OutputMode::Layout);
+    return true;
+}
+
+void App::SetUiVisible(bool visible)
+{
+    m_uiVisible = visible;
+    if (visible)
+    {
+        SDL_ShowWindow(m_control);
+        SDL_RaiseWindow(m_control);
+    }
+    else
+    {
+        SDL_HideWindow(m_control);
+    }
+}
+
+void App::SaveConfig()
+{
+    if (m_opt.configPath.empty())
+    {
+        m_configStatus = "no config path (started with --no-config and no --config)";
+        return;
+    }
+    Options snapshot = m_opt;
+    snapshot.mode = m_rebuildRequested ? m_requestedMode : m_mode;
+    snapshot.showUi = m_uiVisible;
+    if (!snapshot.layoutPath.empty())
+    {
+        std::error_code ec;
+        const fs::path abs = fs::absolute(snapshot.layoutPath, ec);
+        if (!ec)
+        {
+            snapshot.layoutPath = abs.lexically_normal().string();
+        }
+    }
+    if (m_audioOk)
+    {
+        snapshot.source = m_audio.Selected();
+    }
+    if (m_current < m_presetLabels.size())
+    {
+        snapshot.startPreset = m_presetLabels[m_current];
+    }
+    std::string err;
+    if (muq::SaveConfig(m_opt.configPath, snapshot, err))
+    {
+        m_configStatus = "saved to " + m_opt.configPath;
+        std::printf("config: %s\n", m_configStatus.c_str());
+    }
+    else
+    {
+        m_configStatus = "save failed: " + err;
+        std::fprintf(stderr, "config: %s\n", m_configStatus.c_str());
+    }
+}
+
 void App::RefilterPresets()
 {
     m_filtered.clear();
@@ -675,16 +830,7 @@ void App::OnPresetFailed(const char* file, const char* message, void* user)
 
 void App::ToggleUi()
 {
-    m_uiVisible = !m_uiVisible;
-    if (m_uiVisible)
-    {
-        SDL_ShowWindow(m_control);
-        SDL_RaiseWindow(m_control);
-    }
-    else
-    {
-        SDL_HideWindow(m_control);
-    }
+    SetUiVisible(!m_uiVisible);
 }
 
 void App::HandleEvent(const SDL_Event& e)
@@ -713,23 +859,28 @@ void App::HandleEvent(const SDL_Event& e)
             switch (e.key.keysym.sym)
             {
                 case SDLK_n:
-                    projectm_playlist_play_next(m_playlist, !m_opt.smooth);
+                    PlayNext();
                     break;
                 case SDLK_p:
-                    projectm_playlist_play_previous(m_playlist, !m_opt.smooth);
+                    PlayPrev();
                     break;
                 case SDLK_r:
                     PlayRandom();
                     break;
                 case SDLK_l:
-                    m_opt.lock = !m_opt.lock;
-                    projectm_set_preset_locked(m_pm, m_opt.lock);
+                    SetLock(!m_opt.lock);
+                    break;
+                case SDLK_s:
+                    if (mod & KMOD_CTRL)
+                    {
+                        SaveConfig();
+                    }
                     break;
                 case SDLK_LEFTBRACKET:
-                    m_opt.brightness = std::max(0.0f, m_opt.brightness - 0.05f);
+                    SetBrightness(m_opt.brightness - 0.05f);
                     break;
                 case SDLK_RIGHTBRACKET:
-                    m_opt.brightness = std::min(2.0f, m_opt.brightness + 0.05f);
+                    SetBrightness(m_opt.brightness + 0.05f);
                     break;
                 case SDLK_m:
                 case SDLK_TAB:
@@ -738,8 +889,7 @@ void App::HandleEvent(const SDL_Event& e)
                 case SDLK_f:
                     if (m_mode != OutputMode::Layout)
                     {
-                        m_rebuildRequested = true;
-                        m_requestedMode = m_mode == OutputMode::Fullscreen ? OutputMode::Window : OutputMode::Fullscreen;
+                        RequestMode(m_mode == OutputMode::Fullscreen ? OutputMode::Window : OutputMode::Fullscreen);
                     }
                     break;
                 case SDLK_q:
@@ -810,14 +960,14 @@ void App::DrawUi()
             {
                 if (ImGui::Selectable("Default output (monitor)", selected.empty()))
                 {
-                    m_audio.Select("");
+                    SelectSource("");
                 }
                 for (const auto& n : nodes)
                 {
                     ImGui::PushID(static_cast<int>(n.id));
                     if (ImGui::Selectable(NodeLabel(n).c_str(), n.name == selected))
                     {
-                        m_audio.Select(n.name);
+                        SelectSource(n.name);
                     }
                     if (ImGui::IsItemHovered())
                     {
@@ -847,12 +997,12 @@ void App::DrawUi()
         ImGui::TextWrapped("Now: %s", current);
         if (ImGui::Button("<< Prev"))
         {
-            projectm_playlist_play_previous(m_playlist, !m_opt.smooth);
+            PlayPrev();
         }
         ImGui::SameLine();
         if (ImGui::Button("Next >>"))
         {
-            projectm_playlist_play_next(m_playlist, !m_opt.smooth);
+            PlayNext();
         }
         ImGui::SameLine();
         if (ImGui::Button("Random"))
@@ -860,36 +1010,42 @@ void App::DrawUi()
             PlayRandom();
         }
         ImGui::SameLine();
-        if (ImGui::Checkbox("Lock", &m_opt.lock))
+        bool lock = m_opt.lock;
+        if (ImGui::Checkbox("Lock", &lock))
         {
-            projectm_set_preset_locked(m_pm, m_opt.lock);
+            SetLock(lock);
         }
         ImGui::SameLine();
-        if (ImGui::Checkbox("Shuffle", &m_opt.shuffle))
+        bool shuffle = m_opt.shuffle;
+        if (ImGui::Checkbox("Shuffle", &shuffle))
         {
-            projectm_playlist_set_shuffle(m_playlist, m_opt.shuffle);
+            SetShuffle(shuffle);
         }
-        ImGui::Checkbox("Smooth transitions", &m_opt.smooth);
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Beat hard cuts", &m_opt.hardCuts))
+        bool smooth = m_opt.smooth;
+        if (ImGui::Checkbox("Smooth transitions", &smooth))
         {
-            projectm_set_hard_cut_enabled(m_pm, m_opt.hardCuts);
+            SetSmooth(smooth);
+        }
+        ImGui::SameLine();
+        bool hardCuts = m_opt.hardCuts;
+        if (ImGui::Checkbox("Beat hard cuts", &hardCuts))
+        {
+            SetHardCuts(hardCuts);
         }
         float duration = static_cast<float>(m_opt.presetDuration);
         if (ImGui::SliderFloat("Duration (s)", &duration, 5.0f, 300.0f, "%.0f"))
         {
-            m_opt.presetDuration = duration;
-            projectm_set_preset_duration(m_pm, duration);
+            SetDuration(duration);
         }
         float soft = static_cast<float>(m_opt.softCut);
         if (ImGui::SliderFloat("Transition (s)", &soft, 0.0f, 10.0f, "%.1f"))
         {
-            m_opt.softCut = soft;
-            projectm_set_soft_cut_duration(m_pm, soft);
+            SetSoftCut(soft);
         }
-        if (ImGui::SliderFloat("Beat sensitivity", &m_opt.beatSensitivity, 0.0f, 5.0f, "%.2f"))
+        float beat = m_opt.beatSensitivity;
+        if (ImGui::SliderFloat("Beat sensitivity", &beat, 0.0f, 5.0f, "%.2f"))
         {
-            projectm_set_beat_sensitivity(m_pm, m_opt.beatSensitivity);
+            SetBeatSensitivity(beat);
         }
 
         ImGui::SetNextItemWidth(-1);
@@ -953,17 +1109,20 @@ void App::DrawUi()
         ImGui::EndDisabled();
         if (changed)
         {
-            m_rebuildRequested = true;
-            m_requestedMode = static_cast<OutputMode>(mode);
+            RequestMode(static_cast<OutputMode>(mode));
         }
 
         ImGui::BeginDisabled(m_blitProg == 0);
         ImGui::SetNextItemWidth(-160);
-        ImGui::SliderFloat("Brightness", &m_opt.brightness, 0.0f, 2.0f, "%.2f");
+        float brightness = m_opt.brightness;
+        if (ImGui::SliderFloat("Brightness", &brightness, 0.0f, 2.0f, "%.2f"))
+        {
+            SetBrightness(brightness);
+        }
         ImGui::SameLine();
         if (ImGui::Button("Reset##brightness"))
         {
-            m_opt.brightness = 1.0f;
+            SetBrightness(1.0f);
         }
         ImGui::EndDisabled();
 
@@ -982,10 +1141,7 @@ void App::DrawUi()
                               SDL_GetDisplayName(i) ? SDL_GetDisplayName(i) : "?", r.w, r.h, r.x, r.y);
                 if (ImGui::Selectable(label, i == monitor))
                 {
-                    m_opt.monitor = std::to_string(i);
-                    m_opt.origin.reset();
-                    m_rebuildRequested = true;
-                    m_requestedMode = m_mode;
+                    SelectMonitor(i);
                 }
             }
             ImGui::EndCombo();
@@ -996,11 +1152,7 @@ void App::DrawUi()
         ImGui::SameLine();
         if (ImGui::Button("Load JSON"))
         {
-            if (LoadLayout(m_layoutPathBuf))
-            {
-                m_rebuildRequested = true;
-                m_requestedMode = OutputMode::Layout;
-            }
+            LoadLayoutAndSwitch(std::string(m_layoutPathBuf));
         }
         if (!m_layoutError.empty())
         {
@@ -1031,11 +1183,35 @@ void App::DrawUi()
         }
     }
 
+    if (ImGui::CollapsingHeader("Config"))
+    {
+        ImGui::TextWrapped("File: %s", m_opt.configPath.empty() ? "(none)" : m_opt.configPath.c_str());
+        ImGui::BeginDisabled(m_opt.configPath.empty());
+        if (ImGui::Button("Save config"))
+        {
+            SaveConfig();
+        }
+        ImGui::EndDisabled();
+        if (!m_configStatus.empty())
+        {
+            ImGui::SameLine();
+            ImGui::TextWrapped("%s", m_configStatus.c_str());
+        }
+    }
+
     if (ImGui::CollapsingHeader("Info"))
     {
         ImGui::Text("%.1f FPS (target %d)", m_fpsSmoothed, m_opt.fps);
+        if (m_web && m_web->Running())
+        {
+            ImGui::Text("Web UI: http://%s:%d/", m_opt.webBind.c_str(), m_opt.webPort);
+        }
+        else if (m_opt.webEnabled)
+        {
+            ImGui::TextColored({1, 0.6f, 0.3f, 1}, "Web UI: %s", m_web ? m_web->LastError().c_str() : "off");
+        }
         ImGui::TextWrapped("Keys: N next, P prev, R random, L lock, F fullscreen, [ / ] brightness, M/Tab hide panel, "
-                           "Esc (on output) / Ctrl+Q quit");
+                           "Ctrl+S save config, Esc (on output) / Ctrl+Q quit");
     }
     ImGui::End();
 
@@ -1069,6 +1245,7 @@ int App::Run()
         {
             HandleEvent(e);
         }
+        ProcessWebCommands();
         if (m_rebuildRequested)
         {
             m_rebuildRequested = false;
@@ -1078,6 +1255,10 @@ int App::Run()
         FeedAudio();
         RenderOutputs();
         DrawUi();
+        if (m_web && clock::now() - m_lastPublish >= std::chrono::milliseconds(100))
+        {
+            PublishState();
+        }
 
         const auto now = clock::now();
         const double dt = std::chrono::duration<double>(now - last).count();
@@ -1097,6 +1278,11 @@ int App::Run()
 
 void App::Shutdown()
 {
+    if (m_web)
+    {
+        m_web->Stop();
+        m_web.reset();
+    }
     if (m_control && m_gl)
     {
         SDL_GL_MakeCurrent(m_control, m_gl);
@@ -1143,6 +1329,210 @@ void App::Shutdown()
         m_control = nullptr;
     }
     SDL_Quit();
+}
+
+// ---- Web UI bridge ---------------------------------------------------------
+
+void App::StartWeb()
+{
+    if (!m_opt.webEnabled)
+    {
+        return;
+    }
+    m_web = std::make_unique<WebServer>();
+    if (m_web->Start(m_opt.webBind, m_opt.webPort))
+    {
+        std::printf("web: http://%s:%d/\n", m_opt.webBind.c_str(), m_opt.webPort);
+    }
+    else
+    {
+        std::fprintf(stderr, "web: %s (web UI disabled)\n", m_web->LastError().c_str());
+    }
+    PublishPresets();
+}
+
+void App::PublishPresets()
+{
+    if (!m_web)
+    {
+        return;
+    }
+    ++m_presetsVersion;
+    nlohmann::json j;
+    j["version"] = m_presetsVersion;
+    j["labels"] = m_presetLabels;
+    m_web->SetPresets(j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+}
+
+void App::ProcessWebCommands()
+{
+    if (!m_web)
+    {
+        return;
+    }
+    auto cmds = m_web->TakeCommands();
+    for (const auto& c : cmds)
+    {
+        try
+        {
+            ApplyWebCommand(c);
+        }
+        catch (const std::exception& e)
+        {
+            std::fprintf(stderr, "web: bad command %s: %s\n", c.dump().c_str(), e.what());
+        }
+    }
+    if (!cmds.empty())
+    {
+        PublishState(); // reflect the change in the next poll right away
+    }
+}
+
+void App::ApplyWebCommand(const nlohmann::json& c)
+{
+    const std::string cmd = c.at("cmd").get<std::string>();
+    if (cmd == "next")
+        PlayNext();
+    else if (cmd == "prev")
+        PlayPrev();
+    else if (cmd == "random")
+        PlayRandom();
+    else if (cmd == "play")
+        PlayIndex(c.at("index").get<uint32_t>());
+    else if (cmd == "set")
+    {
+        const std::string key = c.at("key").get<std::string>();
+        const auto& v = c.at("value");
+        if (key == "lock")
+            SetLock(v.get<bool>());
+        else if (key == "shuffle")
+            SetShuffle(v.get<bool>());
+        else if (key == "smooth")
+            SetSmooth(v.get<bool>());
+        else if (key == "hardCuts")
+            SetHardCuts(v.get<bool>());
+        else if (key == "duration")
+            SetDuration(v.get<double>());
+        else if (key == "softCut")
+            SetSoftCut(v.get<double>());
+        else if (key == "beatSensitivity")
+            SetBeatSensitivity(v.get<float>());
+        else if (key == "brightness")
+            SetBrightness(v.get<float>());
+        else
+            throw std::runtime_error("unknown key " + key);
+    }
+    else if (cmd == "source")
+        SelectSource(c.at("name").get<std::string>());
+    else if (cmd == "mode")
+    {
+        OutputMode mode{};
+        if (!ParseMode(c.at("mode").get<std::string>(), mode))
+            throw std::runtime_error("unknown mode");
+        RequestMode(mode);
+    }
+    else if (cmd == "monitor")
+        SelectMonitor(c.at("index").get<int>());
+    else if (cmd == "loadLayout")
+        LoadLayoutAndSwitch(c.at("path").get<std::string>());
+    else if (cmd == "ui")
+        SetUiVisible(c.at("visible").get<bool>());
+    else if (cmd == "saveConfig")
+        SaveConfig();
+    else
+        throw std::runtime_error("unknown command");
+}
+
+void App::PublishState()
+{
+    if (!m_web)
+    {
+        return;
+    }
+    m_lastPublish = std::chrono::steady_clock::now();
+    using nlohmann::json;
+    auto rect = [](int x, int y, int w, int h) { return json{{"x", x}, {"y", y}, {"w", w}, {"h", h}}; };
+
+    json audio;
+    audio["ok"] = m_audioOk;
+    audio["error"] = m_audio.LastError();
+    if (m_audioOk)
+    {
+        json nodes = json::array();
+        for (const auto& n : m_audio.Nodes())
+        {
+            nodes.push_back({{"id", n.id},
+                             {"name", n.name},
+                             {"description", n.description},
+                             {"mediaClass", n.mediaClass},
+                             {"isSink", n.isSink},
+                             {"label", NodeLabel(n)}});
+        }
+        audio["nodes"] = std::move(nodes);
+        audio["selected"] = m_audio.Selected();
+        audio["streaming"] = m_audio.Streaming();
+        audio["rate"] = m_audio.Rate();
+        audio["peak"] = std::min(1.0f, m_audio.Peak());
+    }
+
+    json preset;
+    const bool hasCurrent = m_current < m_presetLabels.size();
+    preset["index"] = hasCurrent ? json(m_current) : json(nullptr);
+    preset["label"] = hasCurrent ? m_presetLabels[m_current] : std::string("(idle)");
+    preset["lock"] = m_opt.lock;
+    preset["shuffle"] = m_opt.shuffle;
+    preset["smooth"] = m_opt.smooth;
+    preset["hardCuts"] = m_opt.hardCuts;
+    preset["duration"] = m_opt.presetDuration;
+    preset["softCut"] = m_opt.softCut;
+    preset["beatSensitivity"] = m_opt.beatSensitivity;
+    preset["count"] = m_presetPaths.size();
+    preset["failures"] = m_failures;
+    preset["lastFailure"] = m_lastFailure;
+    preset["presetsVersion"] = m_presetsVersion;
+
+    json output;
+    output["mode"] = ModeName(m_mode);
+    output["pendingMode"] = m_rebuildRequested ? json(ModeName(m_requestedMode)) : json(nullptr);
+    output["layoutLoaded"] = m_layout.has_value();
+    output["brightness"] = m_opt.brightness;
+    output["brightnessAvailable"] = m_blitProg != 0;
+    output["monitor"] = ResolveMonitor();
+    json monitors = json::array();
+    for (int i = 0; i < SDL_GetNumVideoDisplays(); ++i)
+    {
+        SDL_Rect r{};
+        SDL_GetDisplayBounds(i, &r);
+        const char* name = SDL_GetDisplayName(i);
+        json m = rect(r.x, r.y, r.w, r.h);
+        m["index"] = i;
+        m["name"] = name ? name : "?";
+        monitors.push_back(std::move(m));
+    }
+    output["monitors"] = std::move(monitors);
+    output["layoutPath"] = std::string(m_layoutPathBuf);
+    output["layoutError"] = m_layoutError;
+    output["canvas"] = {{"w", m_canvasW}, {"h", m_canvasH}};
+    json outs = json::array();
+    for (const auto& o : m_outputs)
+    {
+        int x = 0, y = 0, w = 0, h = 0;
+        SDL_GetWindowPosition(o.window, &x, &y);
+        SDL_GetWindowSize(o.window, &w, &h);
+        outs.push_back({{"name", o.name},
+                        {"screen", rect(x, y, w, h)},
+                        {"slice", rect(o.source.x, o.source.y, o.source.w, o.source.h)}});
+    }
+    output["outputs"] = std::move(outs);
+
+    json state;
+    state["audio"] = std::move(audio);
+    state["preset"] = std::move(preset);
+    state["output"] = std::move(output);
+    state["config"] = {{"path", m_opt.configPath}, {"status", m_configStatus}};
+    state["info"] = {{"fps", m_fpsSmoothed}, {"targetFps", m_opt.fps}, {"uiVisible", m_uiVisible},
+                     {"version", MUQ_VERSION}};
+    m_web->SetState(state.dump(-1, ' ', false, json::error_handler_t::replace));
 }
 
 } // namespace muq

@@ -2,9 +2,12 @@
 
 #include "AudioPipeWire.hpp"
 #include "ObsLayout.hpp"
+#include "Options.hpp"
+#include "WebServer.hpp"
 
 #include <SDL.h>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,42 +17,6 @@ struct projectm;
 struct projectm_playlist;
 
 namespace muq {
-
-enum class OutputMode
-{
-    Window,
-    Fullscreen,
-    Layout
-};
-
-const char* ModeName(OutputMode mode);
-
-struct Options
-{
-    OutputMode mode = OutputMode::Window;
-    std::string layoutPath;
-    LayoutOptions layout;
-    std::string monitor;              // display index or name substring; empty = 0
-    std::optional<SDL_Point> origin;  // explicit layout origin (overrides monitor)
-    int width = 1280;
-    int height = 720;
-    std::vector<std::string> presetDirs;
-    std::optional<std::string> source; // PipeWire node.name; "" = default sink monitor
-    std::string startPreset;          // substring match of first preset
-    int fps = 60;
-    bool vsync = false;
-    bool shuffle = true;
-    bool hardCuts = false;
-    bool smooth = true;
-    bool lock = false;
-    double presetDuration = 30.0;
-    double softCut = 3.0;
-    float beatSensitivity = 1.0f;
-    float brightness = 1.0f;          // output gain, 0 = black, 1 = unchanged, >1 boost
-    bool showUi = true;
-    bool overrideRedirect = true;
-    float uiScale = 1.0f;
-};
 
 struct Output
 {
@@ -86,9 +53,34 @@ private:
     void HandleEvent(const SDL_Event& event);
     void ToggleUi();
 
+    // Actions shared by the ImGui panel, keyboard and the web UI.
     void PlayIndex(uint32_t index);
     void PlayRandom();
+    void PlayNext();
+    void PlayPrev();
+    void SetLock(bool lock);
+    void SetShuffle(bool shuffle);
+    void SetSmooth(bool smooth);
+    void SetHardCuts(bool hardCuts);
+    void SetDuration(double seconds);
+    void SetSoftCut(double seconds);
+    void SetBeatSensitivity(float sensitivity);
+    void SetBrightness(float brightness);
+    void SelectSource(const std::string& nodeName);
+    void RequestMode(OutputMode mode);
+    void SelectMonitor(int index);
+    bool LoadLayoutAndSwitch(const std::string& path);
+    void SetUiVisible(bool visible);
+    void SaveConfig();
+
     void RefilterPresets();
+
+    // Web UI bridge (render thread).
+    void StartWeb();
+    void ProcessWebCommands();
+    void ApplyWebCommand(const nlohmann::json& cmd);
+    void PublishState();
+    void PublishPresets();
 
     static void OnPresetSwitched(bool hardCut, unsigned int index, void* user);
     static void OnPresetFailed(const char* file, const char* message, void* user);
@@ -136,6 +128,11 @@ private:
     int m_uiMonitor = 0;
 
     double m_fpsSmoothed = 0.0;
+
+    std::unique_ptr<WebServer> m_web;
+    std::chrono::steady_clock::time_point m_lastPublish{};
+    unsigned m_presetsVersion = 0;
+    std::string m_configStatus;
 };
 
 } // namespace muq
